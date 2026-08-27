@@ -1,6 +1,5 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { docs, profileDocKey } from "./storage/index.ts";
+import type { DocKey } from "./storage/index.ts";
 import type { Season, Match, Profile, Goal, Tuning, Scorecard, ObjectiveData, NextGamePlan, FavoriteProfile, ChampionPoolEntry, NotificationItem, Role, PoolTier } from "../shared/types.ts";
 
 // Derive a champion pool from a profile's games: any champion with enough games
@@ -55,15 +54,16 @@ export const DEFAULT_TUNING: Tuning = {
   },
 };
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = resolve(__dirname, "..", "data");
-const LIVE_DATA_FILE = resolve(DATA_DIR, "league-ify.json");
-const DEMO_DATA_FILE = resolve(DATA_DIR, "league-ify.demo.json");
-const PROFILE_FILE = resolve(DATA_DIR, "league-ify.profile.json");
-const META_FILE = resolve(DATA_DIR, "league-ify.meta.json");
-// Each viewed profile (a searched Riot ID) gets its own data file with its own
+// Documents are addressed by logical key now, not by path. Which backend those
+// keys resolve to -- files under data/ on Node, D1 rows on Cloudflare -- is the
+// adapter's business; see server/storage/contract.ts for why the read/write
+// calls below stayed synchronous through the port.
+const LIVE_KEY: DocKey = "live";
+const DEMO_KEY: DocKey = "demo";
+const PROFILE_KEY: DocKey = "profile";
+const META_KEY: DocKey = "meta";
+// Each viewed profile (a searched Riot ID) gets its own document with its own
 // matches, blocks, and goals.
-const PROFILES_DIR = resolve(DATA_DIR, "profiles");
 const profileDbCache = new Map<string, DB>();
 
 interface DB {
@@ -145,22 +145,19 @@ let demoCache: DB | null = null;
 let profileCache: Profile | null = null;
 let metaCache: Meta | null = null;
 
-function ensureDir() {
-  if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
+// These three were readFileSync / writeFileSync / existsSync. They are the
+// entire storage surface of this file -- eleven call sites -- which is why the
+// port did not have to touch the fifty methods below them.
+function readJson<T>(key: DocKey): T | null {
+  return docs().read<T>(key);
 }
 
-function readJson<T>(file: string): T | null {
-  if (!existsSync(file)) return null;
-  try {
-    return JSON.parse(readFileSync(file, "utf8")) as T;
-  } catch {
-    return null;
-  }
+function persistJson(key: DocKey, data: unknown) {
+  docs().write(key, data);
 }
 
-function persistJson(file: string, data: unknown) {
-  ensureDir();
-  writeFileSync(file, JSON.stringify(data, null, 2), "utf8");
+function docExists(key: DocKey): boolean {
+  return docs().exists(key);
 }
 
 function hydrateDb(parsed: Partial<DB> | null): DB {
@@ -184,54 +181,54 @@ function hydrateDb(parsed: Partial<DB> | null): DB {
 
 function loadMeta(): Meta {
   if (metaCache) return metaCache;
-  metaCache = { ...DEFAULT_META, ...(readJson<Meta>(META_FILE) ?? {}) };
-  persistJson(META_FILE, metaCache);
+  metaCache = { ...DEFAULT_META, ...(readJson<Meta>(META_KEY) ?? {}) };
+  persistJson(META_KEY, metaCache);
   return metaCache;
 }
 
 function persistMeta() {
-  persistJson(META_FILE, metaCache ?? DEFAULT_META);
+  persistJson(META_KEY, metaCache ?? DEFAULT_META);
 }
 
 function loadProfile(): Profile {
   if (profileCache) return profileCache;
-  const parsed = readJson<Profile>(PROFILE_FILE);
+  const parsed = readJson<Profile>(PROFILE_KEY);
   if (parsed) {
     profileCache = { ...DEFAULT_PROFILE, ...parsed };
     return profileCache;
   }
 
   // One-time migration: if the legacy live DB had profile embedded, rescue it.
-  const legacy = readJson<{ profile?: Profile }>(LIVE_DATA_FILE);
+  const legacy = readJson<{ profile?: Profile }>(LIVE_KEY);
   profileCache = { ...DEFAULT_PROFILE, ...(legacy?.profile ?? {}) };
-  persistJson(PROFILE_FILE, profileCache);
+  persistJson(PROFILE_KEY, profileCache);
   return profileCache;
 }
 
 function persistProfile() {
-  persistJson(PROFILE_FILE, profileCache ?? DEFAULT_PROFILE);
+  persistJson(PROFILE_KEY, profileCache ?? DEFAULT_PROFILE);
 }
 
 function loadDb(kind: "live" | "demo"): DB {
   const cache = kind === "live" ? liveCache : demoCache;
   if (cache) return cache;
 
-  const file = kind === "live" ? LIVE_DATA_FILE : DEMO_DATA_FILE;
-  const parsed = hydrateDb(readJson<DB & { profile?: Profile }>(file));
+  const key = kind === "live" ? LIVE_KEY : DEMO_KEY;
+  const parsed = hydrateDb(readJson<DB & { profile?: Profile }>(key));
   if (kind === "live") liveCache = parsed;
   else demoCache = parsed;
 
-  if (!existsSync(file)) persistJson(file, parsed);
+  if (!docExists(key)) persistJson(key, parsed);
   return parsed;
 }
 
 function persistDb(kind: "live" | "demo") {
-  const file = kind === "live" ? LIVE_DATA_FILE : DEMO_DATA_FILE;
-  persistJson(file, kind === "live" ? liveCache ?? DEFAULT_DB : demoCache ?? DEFAULT_DB);
+  const key = kind === "live" ? LIVE_KEY : DEMO_KEY;
+  persistJson(key, kind === "live" ? liveCache ?? DEFAULT_DB : demoCache ?? DEFAULT_DB);
 }
 
-function profileFile(key: string) {
-  return resolve(PROFILES_DIR, `${key}.json`);
+function profileFile(key: string): DocKey {
+  return profileDocKey(key);
 }
 
 function loadProfileDb(key: string): DB {
@@ -239,17 +236,13 @@ function loadProfileDb(key: string): DB {
   if (cached) return cached;
   const parsed = hydrateDb(readJson<DB>(profileFile(key)));
   profileDbCache.set(key, parsed);
-  if (!existsSync(profileFile(key))) {
-    if (!existsSync(PROFILES_DIR)) mkdirSync(PROFILES_DIR, { recursive: true });
-    persistJson(profileFile(key), parsed);
-  }
+  if (!docExists(profileFile(key))) persistJson(profileFile(key), parsed);
   return parsed;
 }
 
 function persistProfileDb(key: string) {
   const db = profileDbCache.get(key);
   if (!db) return;
-  if (!existsSync(PROFILES_DIR)) mkdirSync(PROFILES_DIR, { recursive: true });
   persistJson(profileFile(key), db);
 }
 
@@ -263,7 +256,7 @@ function currentDb(): DB {
   if (!ap.isSelf && ap.key) return loadProfileDb(ap.key);
 
   const kind = currentKind();
-  if (kind === "demo" && !existsSync(DEMO_DATA_FILE)) {
+  if (kind === "demo" && !docExists(DEMO_KEY)) {
     demoCache = seedDemoDb();
     persistDb("demo");
   }
@@ -748,14 +741,14 @@ export const store = {
 
   demoState() {
     const meta = loadMeta();
-    return { enabled: meta.demoMode, available: existsSync(DEMO_DATA_FILE) };
+    return { enabled: meta.demoMode, available: docExists(DEMO_KEY) };
   },
 
   setDemoMode(enabled: boolean) {
     const meta = loadMeta();
     meta.demoMode = enabled;
     metaCache = meta;
-    if (enabled && !existsSync(DEMO_DATA_FILE)) {
+    if (enabled && !docExists(DEMO_KEY)) {
       demoCache = seedDemoDb();
       persistDb("demo");
     }

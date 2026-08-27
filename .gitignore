@@ -1,0 +1,18 @@
+node_modules
+dist
+.env
+.env.local
+*.log
+
+# Everything under data/ is either a local cache, a Riot pull, or a real
+# summoner profile — including other people's. The old `data/*.json` rule did
+# not match data/profiles/*.json (a single * does not cross directories), which
+# meant five real profiles were about to be committed. Ignore the directory.
+#
+# If a specific fixture should be tracked (data/league-ify.demo.json is the
+# likely one), add it deliberately:  git add -f data/league-ify.demo.json
+data/
+
+# 26 MB of reference captures of other people's products. Useful while writing
+# the PRD, not something to carry in git history.
+screenshots/

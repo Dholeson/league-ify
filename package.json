@@ -1,0 +1,40 @@
+{
+  "name": "league-ify",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A personal player-development campaign layer for Ranked League of Legends. The scoreboard you actually need.",
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "tsx watch server/index.ts",
+    "dev:web": "vite",
+    "tunnel": "cloudflared tunnel --url http://localhost:5173",
+    "demo": "concurrently -k -n server,web,tunnel -c blue,green,magenta \"npm:dev:server\" \"npm:dev:web\" \"npm:tunnel\"",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@tabler/icons-webfont": "^3.44.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2",
+    "recharts": "^2.12.7",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.5.5",
+    "@types/react": "^18.3.8",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "cloudflared": "^0.7.1",
+    "concurrently": "^9.0.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2",
+    "vite": "^5.4.7"
+  }
+}

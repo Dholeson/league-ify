@@ -46,15 +46,23 @@ interface PagesContext {
   params: { path?: string | string[] };
 }
 
-function jsonResponse(body: unknown, status: number): Response {
-  return new Response(JSON.stringify(body ?? null), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+// Every response here is about one user's session or data, so nothing may be
+// stored by the browser or any cache in between. This has to be set here: the
+// site's _headers file (its "/api/* Cache-Control: no-store" rule) is not
+// applied to Pages Function responses.
+function apiHeaders(): Headers {
+  return new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
   });
 }
 
+function jsonResponse(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body ?? null), { status, headers: apiHeaders() });
+}
+
 function authResponse(result: AuthResult): Response {
-  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  const headers = apiHeaders();
   if (result.setCookie) headers.append("Set-Cookie", result.setCookie);
   return new Response(JSON.stringify(result.body ?? null), { status: result.status, headers });
 }

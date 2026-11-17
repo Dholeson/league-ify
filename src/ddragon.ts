@@ -8,6 +8,8 @@
 // ("Wukong", "Kog'Maw", "Twisted Fate"). Icons/routes need the id; text wants
 // the name. We fetch the champion list once and resolve either way.
 
+import { apiUrl } from "./api.ts";
+
 let version = "16.13.1"; // current fallback; DDragon serves old versions forever
 const listeners = new Set<() => void>();
 try {
@@ -33,7 +35,7 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 const idByKey = new Map<string, string>(); // normalized name OR id -> DDragon id
 const nameById = new Map<string, string>(); // DDragon id -> display name
 
-fetch("/api/champions")
+fetch(apiUrl("/api/champions"))
   .then((r) => r.json())
   .then((data: { champions?: { id: string; name: string }[] }) => {
     for (const c of data.champions ?? []) {

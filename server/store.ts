@@ -145,6 +145,20 @@ let demoCache: DB | null = null;
 let profileCache: Profile | null = null;
 let metaCache: Meta | null = null;
 
+// Drop every in-memory cache so the next access re-reads through the active
+// adapter. The Node server never calls this — its process is long-lived and the
+// caches ARE the live state. The Cloudflare Worker calls it once per request,
+// because an isolate is reused across requests and a stale cache would otherwise
+// serve (or, worse, flush) one request's data into another's. Pairs with
+// useD1() + hydrate() in worker.ts.
+export function resetStoreCaches(): void {
+  liveCache = null;
+  demoCache = null;
+  profileCache = null;
+  metaCache = null;
+  profileDbCache.clear();
+}
+
 // These three were readFileSync / writeFileSync / existsSync. They are the
 // entire storage surface of this file -- eleven call sites -- which is why the
 // port did not have to touch the fifty methods below them.

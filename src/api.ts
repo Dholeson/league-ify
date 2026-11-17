@@ -88,8 +88,18 @@ function activeProfileHeader(): Record<string, string> {
   return headers;
 }
 
+// Where the API lives. Local dev serves it at /api (Vite proxies to the Express
+// server). The hosted build on dhole.dev mounts it under /api/league-ify. The
+// base is injected at build time by vite.config (define: __API_BASE__). Every
+// caller passes a "/api/..." path; this rewrites the "/api" prefix to the base.
+declare const __API_BASE__: string | undefined;
+const API_BASE = typeof __API_BASE__ !== "undefined" ? __API_BASE__ : "/api";
+export function apiUrl(url: string): string {
+  return url.startsWith("/api") ? API_BASE + url.slice(4) : url;
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
+  const res = await fetch(apiUrl(url), {
     ...init,
     headers: { "Content-Type": "application/json", ...activeProfileHeader(), ...(init?.headers ?? {}) },
   });

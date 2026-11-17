@@ -28,13 +28,16 @@ const inflight = new Map<string, Promise<ChampionMeta>>();
 
 function loadCache(): Cache {
   if (cache) return cache;
-  if (existsSync(CACHE_FILE)) {
-    try {
+  // Best-effort read: on a platform without a writable filesystem (the
+  // Cloudflare Worker) existsSync/readFileSync may be absent or throw, so the
+  // cache starts empty rather than crashing the endpoint.
+  try {
+    if (existsSync(CACHE_FILE)) {
       cache = JSON.parse(readFileSync(CACHE_FILE, "utf8")) as Cache;
       return cache;
-    } catch {
-      /* fall through to empty */
     }
+  } catch {
+    /* fall through to empty */
   }
   cache = {};
   return cache;

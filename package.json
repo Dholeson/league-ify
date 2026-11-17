@@ -11,6 +11,8 @@
     "tunnel": "cloudflared tunnel --url http://localhost:5173",
     "demo": "concurrently -k -n server,web,tunnel -c blue,green,magenta \"npm:dev:server\" \"npm:dev:web\" \"npm:tunnel\"",
     "build": "vite build",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build:site": "node scripts/build-site.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "tsx test/storage.test.ts",
@@ -36,6 +38,7 @@
     "@vitejs/plugin-react": "^4.3.1",
     "cloudflared": "^0.7.1",
     "concurrently": "^9.0.1",
+    "esbuild": "^0.28.1",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2",
     "vite": "^5.4.7"

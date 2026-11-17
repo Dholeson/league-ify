@@ -51,21 +51,33 @@ export function createSqliteD1(schemaSql: string): ShimDatabase {
     };
   }
 
+  // Batches run one at a time. Each awaits between statements, and on a single
+  // connection a second batch's BEGIN would land inside the first's
+  // transaction. D1 runs every batch atomically, so concurrent requests
+  // (test/worker-concurrency.test.ts) need the same here.
+  let batchQueue: Promise<unknown> = Promise.resolve();
+
+  async function runBatch(statements: D1PreparedStatement[]) {
+    // D1 runs a batch as one transaction; match that so a failing statement
+    // cannot leave a half-written document behind.
+    db.exec("BEGIN");
+    try {
+      const out: unknown[] = [];
+      for (const s of statements) out.push(await s.run());
+      db.exec("COMMIT");
+      return out;
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+  }
+
   return {
     prepare: (sql: string) => statement(sql),
-    async batch(statements: D1PreparedStatement[]) {
-      // D1 runs a batch as one transaction; match that so a failing statement
-      // cannot leave a half-written document behind.
-      db.exec("BEGIN");
-      try {
-        const out: unknown[] = [];
-        for (const s of statements) out.push(await s.run());
-        db.exec("COMMIT");
-        return out;
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
-      }
+    batch(statements: D1PreparedStatement[]) {
+      const result = batchQueue.then(() => runBatch(statements));
+      batchQueue = result.catch(() => {});
+      return result;
     },
     log,
     resetLog() { log.length = 0; },

@@ -1,5 +1,5 @@
 import { docs, profileDocKey } from "./storage/index.ts";
-import type { DocKey } from "./storage/index.ts";
+import type { DocKey, DocumentStore } from "./storage/index.ts";
 import type { Season, Match, Profile, Goal, Tuning, Scorecard, ObjectiveData, NextGamePlan, FavoriteProfile, ChampionPoolEntry, NotificationItem, Role, PoolTier } from "../shared/types.ts";
 
 // Derive a champion pool from a profile's games: any champion with enough games
@@ -62,9 +62,6 @@ const LIVE_KEY: DocKey = "live";
 const DEMO_KEY: DocKey = "demo";
 const PROFILE_KEY: DocKey = "profile";
 const META_KEY: DocKey = "meta";
-// Each viewed profile (a searched Riot ID) gets its own document with its own
-// matches, blocks, and goals.
-const profileDbCache = new Map<string, DB>();
 
 interface DB {
   version: number;
@@ -140,23 +137,41 @@ const DEFAULT_META: Meta = {
   demoMode: false,
 };
 
-let liveCache: DB | null = null;
-let demoCache: DB | null = null;
-let profileCache: Profile | null = null;
-let metaCache: Meta | null = null;
+// The parsed documents this file works on, cached in memory. They belong to the
+// document store they were read from, not to the module: on Cloudflare one
+// isolate serves several requests AT ONCE, each with its own per-user store
+// (see runWithDocumentStore in storage/index.ts), and module-level caches were
+// shared between them, so one request could read or flush another user's data.
+// Keyed by store, a new store per request means new caches per request. The Node
+// server has one long-lived filesystem store, so there the caches are the live
+// state, exactly as before.
+interface DocCaches {
+  live: DB | null;
+  demo: DB | null;
+  profile: Profile | null;
+  meta: Meta | null;
+  // Each viewed profile (a searched Riot ID) gets its own document with its own
+  // matches, blocks, and goals.
+  profileDbs: Map<string, DB>;
+}
 
-// Drop every in-memory cache so the next access re-reads through the active
-// adapter. The Node server never calls this — its process is long-lived and the
-// caches ARE the live state. The Cloudflare Worker calls it once per request,
-// because an isolate is reused across requests and a stale cache would otherwise
-// serve (or, worse, flush) one request's data into another's. Pairs with
-// useD1() + hydrate() in worker.ts.
+const cachesByStore = new WeakMap<DocumentStore, DocCaches>();
+
+function docCaches(): DocCaches {
+  const store = docs();
+  let c = cachesByStore.get(store);
+  if (!c) {
+    c = { live: null, demo: null, profile: null, meta: null, profileDbs: new Map() };
+    cachesByStore.set(store, c);
+  }
+  return c;
+}
+
+// Drop the active store's caches so the next access re-reads through it. The
+// Worker doesn't need this (each request gets a fresh store); it is for tests
+// and scripts that reuse one store.
 export function resetStoreCaches(): void {
-  liveCache = null;
-  demoCache = null;
-  profileCache = null;
-  metaCache = null;
-  profileDbCache.clear();
+  cachesByStore.delete(docs());
 }
 
 // These three were readFileSync / writeFileSync / existsSync. They are the
@@ -194,43 +209,46 @@ function hydrateDb(parsed: Partial<DB> | null): DB {
 }
 
 function loadMeta(): Meta {
-  if (metaCache) return metaCache;
-  metaCache = { ...DEFAULT_META, ...(readJson<Meta>(META_KEY) ?? {}) };
-  persistJson(META_KEY, metaCache);
-  return metaCache;
+  const c = docCaches();
+  if (c.meta) return c.meta;
+  c.meta = { ...DEFAULT_META, ...(readJson<Meta>(META_KEY) ?? {}) };
+  persistJson(META_KEY, c.meta);
+  return c.meta;
 }
 
 function persistMeta() {
-  persistJson(META_KEY, metaCache ?? DEFAULT_META);
+  persistJson(META_KEY, docCaches().meta ?? DEFAULT_META);
 }
 
 function loadProfile(): Profile {
-  if (profileCache) return profileCache;
+  const c = docCaches();
+  if (c.profile) return c.profile;
   const parsed = readJson<Profile>(PROFILE_KEY);
   if (parsed) {
-    profileCache = { ...DEFAULT_PROFILE, ...parsed };
-    return profileCache;
+    c.profile = { ...DEFAULT_PROFILE, ...parsed };
+    return c.profile;
   }
 
   // One-time migration: if the legacy live DB had profile embedded, rescue it.
   const legacy = readJson<{ profile?: Profile }>(LIVE_KEY);
-  profileCache = { ...DEFAULT_PROFILE, ...(legacy?.profile ?? {}) };
-  persistJson(PROFILE_KEY, profileCache);
-  return profileCache;
+  c.profile = { ...DEFAULT_PROFILE, ...(legacy?.profile ?? {}) };
+  persistJson(PROFILE_KEY, c.profile);
+  return c.profile;
 }
 
 function persistProfile() {
-  persistJson(PROFILE_KEY, profileCache ?? DEFAULT_PROFILE);
+  persistJson(PROFILE_KEY, docCaches().profile ?? DEFAULT_PROFILE);
 }
 
 function loadDb(kind: "live" | "demo"): DB {
-  const cache = kind === "live" ? liveCache : demoCache;
-  if (cache) return cache;
+  const c = docCaches();
+  const cached = kind === "live" ? c.live : c.demo;
+  if (cached) return cached;
 
   const key = kind === "live" ? LIVE_KEY : DEMO_KEY;
   const parsed = hydrateDb(readJson<DB & { profile?: Profile }>(key));
-  if (kind === "live") liveCache = parsed;
-  else demoCache = parsed;
+  if (kind === "live") c.live = parsed;
+  else c.demo = parsed;
 
   if (!docExists(key)) persistJson(key, parsed);
   return parsed;
@@ -238,7 +256,7 @@ function loadDb(kind: "live" | "demo"): DB {
 
 function persistDb(kind: "live" | "demo") {
   const key = kind === "live" ? LIVE_KEY : DEMO_KEY;
-  persistJson(key, kind === "live" ? liveCache ?? DEFAULT_DB : demoCache ?? DEFAULT_DB);
+  persistJson(key, kind === "live" ? docCaches().live ?? DEFAULT_DB : docCaches().demo ?? DEFAULT_DB);
 }
 
 function profileFile(key: string): DocKey {
@@ -246,16 +264,16 @@ function profileFile(key: string): DocKey {
 }
 
 function loadProfileDb(key: string): DB {
-  const cached = profileDbCache.get(key);
+  const cached = docCaches().profileDbs.get(key);
   if (cached) return cached;
   const parsed = hydrateDb(readJson<DB>(profileFile(key)));
-  profileDbCache.set(key, parsed);
+  docCaches().profileDbs.set(key, parsed);
   if (!docExists(profileFile(key))) persistJson(profileFile(key), parsed);
   return parsed;
 }
 
 function persistProfileDb(key: string) {
-  const db = profileDbCache.get(key);
+  const db = docCaches().profileDbs.get(key);
   if (!db) return;
   persistJson(profileFile(key), db);
 }
@@ -271,7 +289,7 @@ function currentDb(): DB {
 
   const kind = currentKind();
   if (kind === "demo" && !docExists(DEMO_KEY)) {
-    demoCache = seedDemoDb();
+    docCaches().demo = seedDemoDb();
     persistDb("demo");
   }
   return loadDb(kind);
@@ -761,16 +779,16 @@ export const store = {
   setDemoMode(enabled: boolean) {
     const meta = loadMeta();
     meta.demoMode = enabled;
-    metaCache = meta;
+    docCaches().meta = meta;
     if (enabled && !docExists(DEMO_KEY)) {
-      demoCache = seedDemoDb();
+      docCaches().demo = seedDemoDb();
       persistDb("demo");
     }
     persistMeta();
   },
 
   resetDemo() {
-    demoCache = seedDemoDb();
+    docCaches().demo = seedDemoDb();
     persistDb("demo");
   },
 
@@ -951,14 +969,14 @@ export const store = {
     const p = loadProfile();
     const favs = p.favorites ?? [];
     if (!favs.some((x) => favKey(x.gameName, x.tagLine) === favKey(f.gameName, f.tagLine))) {
-      profileCache = { ...p, favorites: [...favs, f] };
+      docCaches().profile = { ...p, favorites: [...favs, f] };
       persistProfile();
     }
   },
 
   removeFavorite(gameName: string, tagLine: string) {
     const p = loadProfile();
-    profileCache = {
+    docCaches().profile = {
       ...p,
       favorites: (p.favorites ?? []).filter((x) => favKey(x.gameName, x.tagLine) !== favKey(gameName, tagLine)),
     };
@@ -967,7 +985,7 @@ export const store = {
 
   updateProfile(patch: Partial<Profile>) {
     const profile = loadProfile();
-    profileCache = {
+    docCaches().profile = {
       ...profile,
       ...patch,
       championPool: patch.championPool ?? profile.championPool,
@@ -1040,11 +1058,11 @@ export const store = {
         },
       },
     };
-    if (currentKind() === "live") liveCache = merged;
-    else demoCache = merged;
+    if (currentKind() === "live") docCaches().live = merged;
+    else docCaches().demo = merged;
     saveCurrent();
     if (incoming.profile) {
-      profileCache = { ...DEFAULT_PROFILE, ...incoming.profile };
+      docCaches().profile = { ...DEFAULT_PROFILE, ...incoming.profile };
       persistProfile();
     }
   },

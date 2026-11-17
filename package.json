@@ -15,7 +15,7 @@
     "build:site": "node scripts/build-site.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test": "tsx test/storage.test.ts",
+    "test": "tsx test/storage.test.ts && tsx test/worker-concurrency.test.ts",
     "export:d1": "tsx scripts/export-to-d1.ts",
     "verify:d1": "tsx scripts/verify-d1-roundtrip.ts"
   },

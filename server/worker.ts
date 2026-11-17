@@ -8,19 +8,18 @@
 //   /api/auth/*  — signup / login / logout / me. No session or tenant needed;
 //                  talks to lu_users / lu_sessions directly (server/authRoutes).
 //   everything else — requires a valid session. The lifecycle then mirrors
-//                  server/storage/contract.ts: install the D1 adapter SCOPED TO
-//                  THE USER (tenant "u/<id>"), reset store caches (the isolate
-//                  is reused across requests), hydrate the docs this request
-//                  needs, dispatch under the user + active-profile contexts,
-//                  then flush.
+//                  server/storage/contract.ts: create a D1 store for THIS
+//                  REQUEST, scoped to the user (tenant "u/<id>"), hydrate the
+//                  docs it needs, dispatch under the store + user +
+//                  active-profile contexts, then flush. Nothing is installed
+//                  process-wide: the isolate serves requests concurrently.
 
 import { registerRoutes } from "./routes.ts";
 import { createRouter } from "./workerRouter.ts";
 import { profileContextFor } from "./http.ts";
 import { runWithProfile } from "./activeProfile.ts";
 import { runWithUser } from "./userContext.ts";
-import { docs, useD1, profileDocKey } from "./storage/index.ts";
-import { resetStoreCaches } from "./store.ts";
+import { createD1Store, runWithDocumentStore, profileDocKey } from "./storage/index.ts";
 import { readSessionCookie, requestIsSecure } from "./auth.ts";
 import { signup, login, logout, resolveSession, type AuthResult } from "./authRoutes.ts";
 import type { DocKey } from "./storage/contract.ts";
@@ -121,19 +120,23 @@ export const onRequest = async (context: PagesContext): Promise<Response> => {
     const user = await resolveSession(env.DB, sessionId);
     if (!user) return jsonResponse({ error: "Not signed in." }, 401);
 
-    useD1(env.DB, { tenant: `u/${user.userId}` });
-    resetStoreCaches();
+    // This request's own store, never a process-wide one: the isolate runs
+    // other requests (other users' too) while this one awaits D1. A fresh
+    // store also means fresh store.ts caches (they're keyed by store).
+    const store = createD1Store(env.DB, `u/${user.userId}`);
 
     const ctx = profileContextFor(logicalPath, getHeader);
     const keys: DocKey[] = ["meta", "profile", "live", "demo"];
     if (!ctx.isSelf && ctx.key) keys.push(profileDocKey(ctx.key));
-    await docs().hydrate(keys);
+    await store.hydrate(keys);
 
-    const result = await runWithUser(user, () =>
-      runWithProfile(ctx, () => dispatch(method, logicalPath, query, body, getHeader))
+    const result = await runWithDocumentStore(store, () =>
+      runWithUser(user, () =>
+        runWithProfile(ctx, () => dispatch(method, logicalPath, query, body, getHeader))
+      )
     );
 
-    await docs().flush();
+    await store.flush();
     return jsonResponse(result.body, result.status);
   } catch (e) {
     return jsonResponse({ error: String((e as Error)?.message ?? e) }, 500);

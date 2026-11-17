@@ -35,17 +35,31 @@ const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
 const idByKey = new Map<string, string>(); // normalized name OR id -> DDragon id
 const nameById = new Map<string, string>(); // DDragon id -> display name
 
-fetch(apiUrl("/api/champions"))
-  .then((r) => r.json())
-  .then((data: { champions?: { id: string; name: string }[] }) => {
-    for (const c of data.champions ?? []) {
-      idByKey.set(norm(c.id), c.id);
-      idByKey.set(norm(c.name), c.id);
-      nameById.set(c.id, c.name);
-    }
-    if (idByKey.size) listeners.forEach((l) => l());
-  })
-  .catch(() => {});
+// Not fetched at import time: on the hosted build /api/champions needs a
+// session, and the sign-in screen swaps to the app without a page reload, so an
+// import-time fetch would 401 and leave the map empty for that whole visit.
+// App calls this once it mounts (i.e. once signed in). A failed load clears
+// itself so the next call retries.
+let championsLoad: Promise<void> | null = null;
+export function loadChampions(): Promise<void> {
+  championsLoad ??= fetch(apiUrl("/api/champions"))
+    .then((r) => {
+      if (!r.ok) throw new Error(`champions: HTTP ${r.status}`);
+      return r.json();
+    })
+    .then((data: { champions?: { id: string; name: string }[] }) => {
+      for (const c of data.champions ?? []) {
+        idByKey.set(norm(c.id), c.id);
+        idByKey.set(norm(c.name), c.id);
+        nameById.set(c.id, c.name);
+      }
+      if (idByKey.size) listeners.forEach((l) => l());
+    })
+    .catch(() => {
+      championsLoad = null;
+    });
+  return championsLoad;
+}
 
 // Resolve any champion string (id or display name) to its DDragon id, for icon
 // URLs and routes. Falls back to a stripped version of the input until the map

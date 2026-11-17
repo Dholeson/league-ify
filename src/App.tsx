@@ -17,6 +17,7 @@ import NotificationBell from "./components/NotificationBell.tsx";
 import PullBanner from "./components/PullBanner.tsx";
 import FloatingObjectives from "./components/FloatingObjectives.tsx";
 import { drainPull } from "./pull.ts";
+import { loadChampions } from "./ddragon.ts";
 
 const splashOf = (c: string) => `https://ddragon.leagueoflegends.com/cdn/img/champion/loading/${c}_0.jpg`;
 const REGIONS = [
@@ -356,6 +357,8 @@ export default function App() {
   const loc = useLocation();
   const [active, setActiveState] = useState<FavoriteProfile | null>(loadActive);
   const [filter, setFilterState] = useState<GlobalFilter>(loadFilter);
+  // Champion name <-> id map; App only mounts once signed in (see ddragon.ts).
+  useEffect(() => { loadChampions(); }, []);
   useEffect(() => subscribeFilter(setFilterState), []);
   // Any part of the app can switch profiles (topbar menu, a scoreboard row);
   // the shared module is the writer and notifies us so our state stays in sync.

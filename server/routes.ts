@@ -19,6 +19,7 @@ import type {
 import type { RouteApp } from "./http.ts";
 import { store } from "./store.ts";
 import { runWithProfile, activeProfile, SELF_PROFILE } from "./activeProfile.ts";
+import { selfIdentity } from "./userContext.ts";
 import { IDENTITIES } from "./engine/identities.ts";
 import { enrichMatch, enrichAll } from "./engine/enrich.ts";
 import { benchFor, rankLabel, matchComparison } from "./engine/benchmarks.ts";
@@ -162,11 +163,12 @@ export function registerRoutes(app: RouteApp): void {
 
   app.get("/api/config", (_req, res) => {
     const riot = riotFromEnv();
+    const id = selfIdentity();
     const cfg: AppConfig = {
       riotConfigured: !!riot,
-      gameName: process.env.RIOT_GAME_NAME ?? null,
-      tagLine: process.env.RIOT_TAG_LINE ?? null,
-      platform: process.env.RIOT_PLATFORM ?? null,
+      gameName: id.gameName,
+      tagLine: id.tagLine,
+      platform: id.platform,
       activeSeasonId: store.settings().activeSeasonId,
       demoMode: store.demoState().enabled,
       sessionGapMinutes: store.settings().sessionGapMinutes,
@@ -200,10 +202,11 @@ export function registerRoutes(app: RouteApp): void {
       }
     }
 
+    const id = selfIdentity();
     const header: ProfileHeader = {
-      gameName: process.env.RIOT_GAME_NAME ?? null,
-      tagLine: process.env.RIOT_TAG_LINE ?? null,
-      platform: process.env.RIOT_PLATFORM ?? null,
+      gameName: id.gameName,
+      tagLine: id.tagLine,
+      platform: id.platform,
       level,
       profileIconId,
       tier: latest?.tier ?? null,
@@ -223,7 +226,7 @@ export function registerRoutes(app: RouteApp): void {
       .object({ gameName: z.string().min(1), tagLine: z.string().min(1), platform: z.string().optional() })
       .safeParse(req.body);
     if (!b.success) return res.status(400).json({ error: b.error.flatten() });
-    store.addFavorite({ gameName: b.data.gameName, tagLine: b.data.tagLine, platform: b.data.platform || process.env.RIOT_PLATFORM || "na1" });
+    store.addFavorite({ gameName: b.data.gameName, tagLine: b.data.tagLine, platform: b.data.platform || selfIdentity().platform });
     res.json(store.favorites());
   });
 
@@ -871,8 +874,7 @@ export function registerRoutes(app: RouteApp): void {
     const platform =
       (typeof req.query.platform === "string" && req.query.platform) ||
       TAG_PLATFORM[tag.toUpperCase()] ||
-      process.env.RIOT_PLATFORM ||
-      "na1";
+      selfIdentity().platform;
     if (!game || !tag)
       return res.status(400).json({ error: "Provide a Riot ID as game name and tag (e.g. Dhole#NA1)." });
     try {

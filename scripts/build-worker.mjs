@@ -43,6 +43,12 @@ export async function buildWorker() {
     mainFields: ["module", "main"],
     external: ["node:*"],
     plugins: [stubLcu],
+    // On workerd import.meta.url is undefined, so the top-level
+    // `fileURLToPath(import.meta.url)` in fsStore / the LLM cache modules throws
+    // at init and the whole Worker fails to load. Those paths are only used for
+    // the on-disk JSON caches, which never run on the Worker (the fs calls are
+    // guarded), so a dummy file URL keeps module init from throwing.
+    define: { "import.meta.url": JSON.stringify("file:///worker.mjs") },
     legalComments: "none",
     logLevel: "info",
     metafile: true,

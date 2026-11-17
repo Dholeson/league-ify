@@ -4,53 +4,41 @@
 // single esbuild bundle — see scripts/build-worker.mjs). Every request to
 // /api/league-ify/* lands here.
 //
-// The lifecycle mirrors what server/storage/contract.ts describes: point the
-// store at D1, load the documents this request needs, run the same handler the
-// Node server runs, then persist what changed.
-//
-//   1. copy the operator's static config (Riot key, identity) into process.env,
-//      which riot.ts / coach.ts read;
-//   2. install the D1 adapter and reset store.ts's in-memory caches, because a
-//      Worker isolate is reused across requests and those caches would otherwise
-//      leak one request's data into the next;
-//   3. hydrate meta/profile, decide which database (live/demo) + profile the
-//      request touches, hydrate those;
-//   4. dispatch under the request's active-profile context;
-//   5. flush staged writes back to D1.
+// Two request shapes:
+//   /api/auth/*  — signup / login / logout / me. No session or tenant needed;
+//                  talks to lu_users / lu_sessions directly (server/authRoutes).
+//   everything else — requires a valid session. The lifecycle then mirrors
+//                  server/storage/contract.ts: install the D1 adapter SCOPED TO
+//                  THE USER (tenant "u/<id>"), reset store caches (the isolate
+//                  is reused across requests), hydrate the docs this request
+//                  needs, dispatch under the user + active-profile contexts,
+//                  then flush.
 
 import { registerRoutes } from "./routes.ts";
 import { createRouter } from "./workerRouter.ts";
 import { profileContextFor } from "./http.ts";
 import { runWithProfile } from "./activeProfile.ts";
-import { docs, useD1, resolveKeys } from "./storage/index.ts";
-import { store, resetStoreCaches } from "./store.ts";
+import { runWithUser } from "./userContext.ts";
+import { docs, useD1, profileDocKey } from "./storage/index.ts";
+import { resetStoreCaches } from "./store.ts";
+import { readSessionCookie, requestIsSecure } from "./auth.ts";
+import { signup, login, logout, resolveSession, type AuthResult } from "./authRoutes.ts";
+import type { DocKey } from "./storage/contract.ts";
 import type { D1Database } from "./storage/d1Store.ts";
 
-// The router is built once per isolate; handlers are stateless (all state lives
-// in the per-request store caches, reset below).
 const { app, dispatch } = createRouter();
 registerRoutes(app);
 
 export interface Env {
   DB: D1Database;
   RIOT_API_KEY?: string;
-  RIOT_GAME_NAME?: string;
-  RIOT_TAG_LINE?: string;
   RIOT_PLATFORM?: string;
   ANTHROPIC_API_KEY?: string;
   ANTHROPIC_AUTH_TOKEN?: string;
 }
 
-// Operator-static config — identical for every request, so copying it onto the
-// shared process.env is safe even with concurrent requests in one isolate.
-const CONFIG_KEYS = [
-  "RIOT_API_KEY",
-  "RIOT_GAME_NAME",
-  "RIOT_TAG_LINE",
-  "RIOT_PLATFORM",
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-] as const;
+// Shared server config (NOT per-user identity — that comes from the account).
+const CONFIG_KEYS = ["RIOT_API_KEY", "RIOT_PLATFORM", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] as const;
 
 interface PagesContext {
   request: Request;
@@ -65,20 +53,21 @@ function jsonResponse(body: unknown, status: number): Response {
   });
 }
 
+function authResponse(result: AuthResult): Response {
+  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  if (result.setCookie) headers.append("Set-Cookie", result.setCookie);
+  return new Response(JSON.stringify(result.body ?? null), { status: result.status, headers });
+}
+
 export const onRequest = async (context: PagesContext): Promise<Response> => {
   const { request, env, params } = context;
 
-  // 1. operator config -> process.env
   for (const k of CONFIG_KEYS) {
     const v = env[k];
     if (v != null) (process.env as Record<string, string>)[k] = v;
   }
 
-  // 2. per-request store setup
-  useD1(env.DB);
-  resetStoreCaches();
-
-  // 3. logical path: /api/league-ify/dashboard -> /api/dashboard
+  // /api/league-ify/dashboard -> /api/dashboard ; /api/league-ify/auth/login -> /api/auth/login
   const rest = Array.isArray(params.path) ? params.path.join("/") : params.path ?? "";
   const logicalPath = "/api/" + rest;
 
@@ -100,27 +89,43 @@ export const onRequest = async (context: PagesContext): Promise<Response> => {
   }
 
   const getHeader = (name: string) => request.headers.get(name) ?? undefined;
+  const secure = requestIsSecure(request);
+  const ua = request.headers.get("user-agent");
+  const sessionId = readSessionCookie(request);
 
   try {
-    // 3b. hydrate the small always-on docs, then the ones this request needs.
-    await docs().hydrate(["meta", "profile"]);
-    const demoMode = store.demoState().enabled;
+    // --- account endpoints (no session/tenant required) ---
+    if (logicalPath === "/api/auth/signup" && method === "POST") {
+      return authResponse(await signup(env.DB, body, { ua, secure }));
+    }
+    if (logicalPath === "/api/auth/login" && method === "POST") {
+      return authResponse(await login(env.DB, body, { ua, secure }));
+    }
+    if (logicalPath === "/api/auth/logout" && method === "POST") {
+      return authResponse(await logout(env.DB, sessionId, { ua, secure }));
+    }
+    if (logicalPath === "/api/auth/me" && method === "GET") {
+      const user = await resolveSession(env.DB, sessionId);
+      return jsonResponse({ user }, 200);
+    }
+
+    // --- everything else is a signed-in, per-user data request ---
+    const user = await resolveSession(env.DB, sessionId);
+    if (!user) return jsonResponse({ error: "Not signed in." }, 401);
+
+    useD1(env.DB, { tenant: `u/${user.userId}` });
+    resetStoreCaches();
+
     const ctx = profileContextFor(logicalPath, getHeader);
-    const keys = resolveKeys({
-      demoMode,
-      activeProfileKey: ctx.key,
-      isSelf: ctx.isSelf,
-    });
+    const keys: DocKey[] = ["meta", "profile", "live", "demo"];
+    if (!ctx.isSelf && ctx.key) keys.push(profileDocKey(ctx.key));
     await docs().hydrate(keys);
 
-    // 4. dispatch under the active-profile context
-    const result = await runWithProfile(ctx, () =>
-      dispatch(method, logicalPath, query, body, getHeader)
+    const result = await runWithUser(user, () =>
+      runWithProfile(ctx, () => dispatch(method, logicalPath, query, body, getHeader))
     );
 
-    // 5. persist staged writes (only on success — a thrown handler discards)
     await docs().flush();
-
     return jsonResponse(result.body, result.status);
   } catch (e) {
     return jsonResponse({ error: String((e as Error)?.message ?? e) }, 500);

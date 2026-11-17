@@ -1,4 +1,5 @@
 import type { ObjectiveData, AdvancedStats, Role, Side } from "../shared/types.ts";
+import { selfIdentity } from "./userContext.ts";
 
 // ---------------------------------------------------------------------------
 // RIOT API CLIENT
@@ -497,11 +498,12 @@ function parseFights(
   return out;
 }
 
+// The "self" Riot client. The API key is always the shared server secret; the
+// summoner identity is the logged-in user's (selfIdentity falls back to the
+// RIOT_* env vars when no user is in context, i.e. local single-user dev).
 export function riotFromEnv(): RiotClient | null {
   const key = process.env.RIOT_API_KEY;
-  const gameName = process.env.RIOT_GAME_NAME;
-  const tagLine = process.env.RIOT_TAG_LINE;
-  const platform = process.env.RIOT_PLATFORM ?? "na1";
+  const { gameName, tagLine, platform } = selfIdentity();
   if (!key || !gameName || !tagLine) return null;
   return new RiotClient(key, gameName, tagLine, platform);
 }

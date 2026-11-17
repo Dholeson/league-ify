@@ -49,7 +49,15 @@ interface Snapshot {
   existed: boolean;
 }
 
-export function createD1Store(db: D1Database): DocumentStore {
+// A tenant scopes every key to one user: the logical key "live" becomes the
+// physical row key "u/<id>/live". store.ts and the engine only ever see logical
+// keys; the prefix is applied on the way to SQL and stripped on the way back, so
+// multi-tenancy is invisible above this adapter. No tenant (Node/tests) = no
+// prefix, i.e. the single-tenant behaviour this adapter started with.
+export function createD1Store(db: D1Database, tenant?: string): DocumentStore {
+  const prefix = tenant ? tenant.replace(/\/+$/, "") + "/" : "";
+  const physical = (key: DocKey): string => prefix + key;
+
   // What we loaded, so flush() can tell what actually changed.
   const snapshots = new Map<DocKey, Snapshot>();
   // What callers have written since hydrate.
@@ -100,18 +108,18 @@ export function createD1Store(db: D1Database): DocumentStore {
     },
 
     async hydrate(keys?: DocKey[]): Promise<void> {
-      const wanted = keys ?? await allKeys(db);
+      const wanted = keys ?? await allKeys(db, prefix);
       for (const key of wanted) {
         if (snapshots.has(key)) continue;
 
         const row = await db
           .prepare("SELECT body FROM documents WHERE doc_key = ?")
-          .bind(key)
+          .bind(physical(key))
           .first<{ body: string }>();
 
         const matchRows = await db
           .prepare("SELECT match_id, body FROM matches WHERE doc_key = ? ORDER BY ord")
-          .bind(key)
+          .bind(physical(key))
           .all<{ match_id: string; body: string }>();
 
         const matches = new Map<string, string>();
@@ -158,7 +166,7 @@ export function createD1Store(db: D1Database): DocumentStore {
             db.prepare(
               `INSERT INTO documents (doc_key, body, updated_at) VALUES (?, ?, ?)
                ON CONFLICT(doc_key) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at`
-            ).bind(key, bodyText, now)
+            ).bind(physical(key), bodyText, now)
           );
         }
 
@@ -180,14 +188,14 @@ export function createD1Store(db: D1Database): DocumentStore {
               `INSERT INTO matches (doc_key, match_id, ord, body, updated_at) VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(doc_key, match_id) DO UPDATE SET
                  ord = excluded.ord, body = excluded.body, updated_at = excluded.updated_at`
-            ).bind(key, id, position, text, now)
+            ).bind(physical(key), id, position, text, now)
           );
         }
 
         for (const id of snap.matches.keys()) {
           if (incoming.has(id)) continue;
           statements.push(
-            db.prepare("DELETE FROM matches WHERE doc_key = ? AND match_id = ?").bind(key, id)
+            db.prepare("DELETE FROM matches WHERE doc_key = ? AND match_id = ?").bind(physical(key), id)
           );
         }
 
@@ -209,7 +217,13 @@ export function createD1Store(db: D1Database): DocumentStore {
   };
 }
 
-async function allKeys(db: D1Database): Promise<DocKey[]> {
+// All logical keys that exist for this tenant. The prefix filters to the
+// tenant's own rows and is stripped so callers get bare logical keys. With no
+// tenant (prefix ""), this returns every key, as it always did.
+async function allKeys(db: D1Database, prefix: string): Promise<DocKey[]> {
   const rows = await db.prepare("SELECT doc_key FROM documents").all<{ doc_key: string }>();
-  return rows.results.map(r => r.doc_key as DocKey);
+  return rows.results
+    .map(r => r.doc_key)
+    .filter(k => k.startsWith(prefix))
+    .map(k => k.slice(prefix.length) as DocKey);
 }

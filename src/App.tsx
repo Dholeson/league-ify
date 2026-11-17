@@ -400,6 +400,15 @@ export default function App() {
             <span className="nav-label">Settings</span>
           </NavLink>
           {isActivePath("/settings", loc.pathname) && <Subnav />}
+          <button
+            className="nav-item"
+            title="Log out"
+            onClick={() => { api.logout().finally(() => window.location.reload()); }}
+            style={{ background: "none", border: "none", cursor: "pointer", width: "100%", textAlign: "left", font: "inherit" }}
+          >
+            <i className="ti ti-logout" aria-hidden="true" />
+            <span className="nav-label">Log out</span>
+          </button>
         </nav>
       </aside>
 

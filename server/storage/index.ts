@@ -16,9 +16,12 @@ export function useDocumentStore(store: DocumentStore): DocumentStore {
   return store;
 }
 
-/** Install the D1 adapter for a request. */
-export function useD1(db: D1Database): DocumentStore {
-  return useDocumentStore(createD1Store(db));
+/**
+ * Install the D1 adapter for a request. `tenant` scopes every document to one
+ * user (keys become "u/<id>/..."); omit it for single-tenant use.
+ */
+export function useD1(db: D1Database, opts?: { tenant?: string }): DocumentStore {
+  return useDocumentStore(createD1Store(db, opts?.tenant));
 }
 
 /**

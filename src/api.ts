@@ -113,7 +113,46 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+// The signed-in account (null when logged out). Matches server CurrentUser.
+export interface AuthUser {
+  userId: number;
+  email: string;
+  displayName: string;
+  gameName: string | null;
+  tagLine: string | null;
+  platform: string | null;
+}
+
+export interface SignupInput {
+  email: string;
+  password: string;
+  riotGameName: string;
+  riotTagLine: string;
+  platform: string;
+}
+
 export const api = {
+  // --- accounts ---
+  // Never throws: a logged-out visitor just gets null, which the app treats as
+  // "show the login screen" rather than an error.
+  authMe: async (): Promise<AuthUser | null> => {
+    try {
+      const res = await fetch(apiUrl("/api/auth/me"), {
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return (data && data.user) || null;
+    } catch {
+      return null;
+    }
+  },
+  signup: (body: SignupInput) =>
+    req<{ user: AuthUser }>("/api/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+  login: (email: string, password: string) =>
+    req<{ user: AuthUser }>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => req<{ ok: true }>("/api/auth/logout", { method: "POST" }),
+
   config: () => req<AppConfig>("/api/config"),
   identities: () => req<Identity[]>("/api/identities"),
   dashboard: (queue?: string, role?: string | null) => {
